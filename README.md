@@ -1,15 +1,9 @@
-Below is the same file with the line numbers removed from the command line arguments:
-
----
-
 # SNOWS Official Codebase
 
 This repository contains the official code for the ICLR 2025 paper:  
 **Preserving Deep Representations in One-Shot Pruning: A Hessian-Free Second-Order Optimization Framework**
 
-SNOWS is a one-shot, post-training pruning framework aimed at reducing the cost of deep vision model inference without retraining. Unlike existing one-shot methods that focus on layer-wise reconstruction, SNOWS optimizes a more global reconstruction objective that captures deep, nonlinear representations in the network. We solve this challenging objective efficiently via a specialized second-order (Hessian-free) optimization routine.
-
-A key advantage of SNOWS is that it can be applied on top of any existing sparse mask to further readjust weights, exploiting nonlinearities in deeper layers. SNOWS achieves state-of-the-art performance across various benchmarks, including large Vision Transformers such as ViT-B/16 and ViT-L/16.
+SNOWS is a one-shot, post-training pruning framework aimed at reducing the cost of deep vision model inference without retraining. Unlike existing one-shot methods that focus on layer-wise reconstruction, SNOWS optimizes a more global reconstruction objective that captures deep, nonlinear feature representations. We solve this challenging objective efficiently via second-order (Hessian-free) optimization.
 
 ---
 
