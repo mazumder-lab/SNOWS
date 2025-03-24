@@ -6,8 +6,7 @@ import sys
 import copy
 import numpy as np
 
-ALG_PATH = './SNOWS'
-sys.path.append(ALG_PATH)
+
 from SNOWS import (
     get_blocks,
     find_module,
