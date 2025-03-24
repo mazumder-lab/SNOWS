@@ -1,15 +1,11 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-import copy
 from collections import OrderedDict
 from joblib import delayed, Parallel
 import itertools
-from helpers import get_submodel, get_submodel_blocks, get_submodel_resnet50, replace_func
+from helpers import get_submodel, replace_func
 from torch.autograd import Variable, grad
-import math
-import gc
 
 def count_operations_in_block(block_tuple, cur_module=None):
     """Count the number of Conv2d, ReLU, Linear operations, and downsample layers in a block, starting from cur_module."""
@@ -366,90 +362,6 @@ def conjugate_gradient_sparse(hvp_fn, b, tol=1e-3, max_iter=5000, lambda_reg=1e-
     return x, i + 1  # Return the solution x and the number of iterations
 
 
-    
-def iterative_pruning_gradual(W_init, sparsity_levels, solve_for_W_given_Z, param_size, model, model_update,
-                              newton_xdata, total_blocks, block_count, conv_layer, block_list,
-                              layerparams, k_step, device, M, groups, batch_size, batching,
-                              CG_iterations, elimination_fraction=0.2, newton_steps = 3):
-
-    print(elimination_fraction)
-
-    W = torch.clone(W_init)
-    W_2d = W.reshape(param_size[0], -1).T
-    total_params = np.prod(param_size)
-
-    # Initialize dictionaries to store loss and W for each sparsity pattern
-    loss_dict = {M: 0}  # 0 reconstruction loss
-    W_dict = {M: W.cpu()}  # Dense model
-    projection_metrics = torch.abs(torch.clone(W))
-
-    for t, sparsity in enumerate(sparsity_levels):
-        print(f"Sparsity Level: {sparsity}")
-
-        # Initialize remaining pairs as (output_channel, group_index) tuples
-        remaining_pairs = {(output_channel, group_idx) for output_channel in range(W_2d.shape[1]) for group_idx in range(len(groups))}
-        total_pairs = len(remaining_pairs)
-
-        while len(remaining_pairs) >= 1:
-            print(f"Remaining pairs: {len(remaining_pairs)}")
-
-            W = W.reshape(param_size[0], -1).T # back to 2d
-
-            # W_MP_manual = MP_MN(W.detach().cpu().numpy(), groups=groups, N=sparsity)
-            
-            # Prune and update
-            W_MP, remaining_pairs, mask = prune_and_update(W, pairs=remaining_pairs, groups=groups, total_pairs=total_pairs, elimination_fraction=elimination_fraction)
-
-            # Convert pruned weights back to tensor and reshape
-            w_sol = torch.tensor(W_MP)
-            w_sol = w_sol.T.reshape(-1).reshape(param_size).to(device).to(torch.float32)
-            mask = (torch.abs(w_sol) > 1e-7).float()
-
-            print(W_MP.shape, W_MP_manual.shape)
-
-            print(W_MP.detach().cpu().numpy() - W_MP_manual)
-
-            print("------")
-            print(W_MP)
-
-            print("------")
-
-            print("------")
-            print(W_MP_manual)
-            print("------")
-            CG_iterations = 5000 if t == len(sparsity_levels) - 1 else 200 
-            
-            # Solve for the optimal W given the current mask Z
-            w_sol, loss = solve_for_W_given_Z(Z=mask,
-                                        model=model,
-                                        model_update=model_update,
-                                        xdata=newton_xdata,
-                                        block_number=block_count,
-                                        k_step=k_step,
-                                        total_blocks=total_blocks,
-                                        device=device,
-                                        N=sparsity,
-                                        M=M,
-                                        w_warm=w_sol,
-                                        conv_layer=conv_layer,
-                                        block_list=block_list,
-                                        CG_iterations=CG_iterations,
-                                        newton_steps=newton_steps,
-                                        batching=batching,
-                                        batch_size=batch_size)
-
-            # Update W for the next pruning iteration
-            W = w_sol * mask
- 
-        # Store the current W and loss to the dictionaries
-        W_dict[sparsity] = W.cpu()
-        loss_dict[sparsity] = loss
-
-        print(f"Sparsity: {sparsity}, Loss: {loss}")
-
-    # Return the final W, W_dict, and loss_dict
-    return W, W_dict, loss_dict
-
 
 
     
@@ -666,76 +578,6 @@ def get_blocks(model):
         
     return block_list
 
-
-def backward_selection_all_unstr(W, XTX, XTY, k_spar, device = 'cuda'):
-
-    W = torch.tensor(W).to(device)
-    XTX = torch.tensor(XTX).to(device)
-    XTY = torch.tensor(XTY).to(device)
-    
-    totp, num_cout = W.shape
-    W_sol = torch.zeros_like(W)
-
-    # Compute the inverse of XTX
-    XTX_inv = torch.linalg.inv(XTX)
-
-    # Initialize XTX_invlist by repeating XTX_inv for each output channel
-    XTX_invlist = XTX_inv.unsqueeze(-1).repeat(1, 1, num_cout)
-
-    # Compute initial solution W_sol
-    W_sol = XTX_inv @ XTY  # Shape: (totp, num_cout)
-
-    # Initialize mask_idx: 0 where W_sol != 0, inf where W_sol == 0
-    mask_idx = torch.where(W_sol != 0, torch.zeros_like(W_sol), torch.full_like(W_sol, float('inf')))
-
-    # Initialize prune_obj
-    prune_obj = torch.zeros_like(W_sol)
-    for i_c in range(num_cout):
-        diag_XTX_inv = torch.diagonal(XTX_invlist[:, :, i_c]) + mask_idx[:, i_c]
-        prune_obj[:, i_c] = W_sol[:, i_c] ** 2 / diag_XTX_inv + mask_idx[:, i_c]
-
-    # Count the initial number of non-zero weights
-    k_init = torch.count_nonzero(W_sol).item()
-
-    # Start pruning
-    for i_p in range(k_init - k_spar):
-        # Flatten prune_obj to find the global minimum
-        prune_obj_flat = prune_obj.view(-1)
-        prune_idx = torch.argmin(prune_obj_flat)
-
-        # Convert flat index to 2D indices
-        idx1 = int((prune_idx // num_cout).item())
-        idx2 = int((prune_idx % num_cout).item())
-
-        # Update mask_idx to mark the pruned weight
-        mask_idx[idx1, idx2] = float('inf')
-
-        # Compute the factor for updating W_sol
-        denominator = XTX_invlist[idx1, idx1, idx2]
-        if denominator == 0:
-            # Avoid division by zero
-            continue
-        factor = W_sol[idx1, idx2] / denominator
-
-        # Update W_sol
-        W_sol[:, idx2] -= factor * XTX_invlist[:, idx1, idx2]
-        W_sol[idx1, idx2] = 0
-
-        # Update XTX_invlist for the current output channel
-        numerator = XTX_invlist[:, idx1:idx1 + 1, idx2] @ XTX_invlist[idx1:idx1 + 1, :, idx2]
-        XTX_invlist[:, :, idx2] -= numerator / denominator
-
-        # Zero out the pruned indices in XTX_invlist
-        XTX_invlist[:, idx1, idx2] = 0
-        XTX_invlist[idx1, :, idx2] = 0
-
-        # Recompute prune_obj for the affected output channel
-        diag_XTX_inv = torch.diagonal(XTX_invlist[:, :, idx2]) + mask_idx[:, idx2]
-        prune_obj[:, idx2] = W_sol[:, idx2] ** 2 / diag_XTX_inv + mask_idx[:, idx2]
-
-    return W_sol.detach().cpu().numpy()
-
-
 def MP_MN(w_var, groups, N):
 
     # Ensure w_var is a torch tensor
@@ -763,38 +605,7 @@ def MP_MN(w_var, groups, N):
     
     return w_var.cpu().numpy()
 
-def MN_random(w_var, groups, N):
-    # Ensure w_var is a torch tensor
-    if not isinstance(w_var, torch.Tensor):
-        w_var = torch.tensor(w_var)
-    
-    # Create a copy of w_var to avoid modifying the original tensor in-place
-    w_var_sparse = w_var.clone()
 
-    # Iterate over each output channel
-    for output_channel in range(w_var_sparse.shape[1]):
-        for group in groups:
-            # Extract the values from w_var for the current group
-            group_values = w_var_sparse[group, output_channel]
-
-            # Create a random mask by selecting N random indices
-            total_elements = group_values.numel()
-            # Ensure N does not exceed the number of elements in the group
-            N = min(N, total_elements)
-            random_indices = torch.randperm(total_elements)[:N]
-
-            # Create a mask where only the random N indices are True
-            mask = torch.zeros_like(group_values, dtype=torch.bool)
-            mask[random_indices] = True
-
-            # Set values not in the random N to zero
-            group_values[~mask] = 0
-
-            # Place the processed group back into w_var_sparse
-            w_var_sparse[group, output_channel] = group_values
-
-    return w_var_sparse.cpu().numpy()
-    
 def weight_update_unstr_torch(W, XTX, XTY):
     
     p, m = W.shape
@@ -912,59 +723,6 @@ def generate_M_sized_groups(d_in, k_h, k_w, M):
     return groups
 
 
-def prune_and_update(w_var, pairs, groups, total_pairs, elimination_fraction=0.2, abs_largest = True):
-    """
-    Prunes the smallest non-zero elements across all (output channel, group_index) pairs
-    and returns the pruned weights, updated pairs, and updated mask.
-    """
-    mask = torch.ones_like(w_var, dtype=torch.float32)
-    smallest_elements = []
-
-    # Collect smallest non-zero elements from each (output channel, group_index) pair
-    for output_channel, group_idx in list(pairs):  # Use list(pairs) to iterate over a copy, allowing safe removal
-        group = groups[group_idx]
-        group_values = w_var[group, output_channel]  # Keep the structure
-
-        # Exclude zeros by setting them to infinity temporarily for the min operation
-        non_zero_mask = group_values != 0
-        
-        if torch.any(non_zero_mask):
-            non_zero_values = torch.where(non_zero_mask, group_values, torch.tensor(float('inf')).to(group_values.device))
-
-            if abs_largest:
-                # Find the minimum non-zero value and its index within the group
-                min_value, min_idx = torch.min(torch.abs(non_zero_values), dim=0)
-            else:
-                min_value, min_idx = torch.min(non_zero_values, dim=0)
-
-            # Handle the case where group_values might be multidimensional
-            if group_values.ndim > 1:
-                min_idx = min_idx.item()  # Convert tensor index to scalar
-
-            # Record the minimum non-zero value along with the indices
-            smallest_elements.append((min_value.item(), group[min_idx], output_channel, group_idx))
-        else:
-            # Discard the pair if it doesn't pass the non_zero_mask condition
-            pairs.discard((output_channel, group_idx))
-
-    # Sort all collected elements by their magnitude
-    smallest_elements.sort(key=lambda x: x[0])
-
-    # Determine the number of (output channel, group_index) pairs to prune, rounding up
-    num_pairs_to_prune = max(1, math.ceil(total_pairs * elimination_fraction))
-
-    # Prune the smallest (output channel, group_index) pairs
-    for _, min_group_idx, output_channel, group_idx in smallest_elements[:num_pairs_to_prune]:
-        # Zero out the group values in the correct output channel
-        w_var[min_group_idx, output_channel] = 0
-        
-        # Update the mask to reflect the pruning
-        mask[min_group_idx, output_channel] = 0
-        
-        # Remove the pruned pair from the set of remaining pairs
-        pairs.discard((output_channel, group_idx))
-
-    return w_var, pairs, mask
 
 def generate_M_sized_groups_fc(d_col, M):
     groups = []
@@ -1152,3 +910,56 @@ def MP_unstr(w_var, p):
 
 #     return W_proj
 
+def prune_and_update(w_var, pairs, groups, total_pairs, elimination_fraction=0.2, abs_largest = True):
+#     """
+#     Prunes the smallest non-zero elements across all (output channel, group_index) pairs
+#     and returns the pruned weights, updated pairs, and updated mask.
+#     """
+#     mask = torch.ones_like(w_var, dtype=torch.float32)
+#     smallest_elements = []
+
+#     # Collect smallest non-zero elements from each (output channel, group_index) pair
+#     for output_channel, group_idx in list(pairs):  # Use list(pairs) to iterate over a copy, allowing safe removal
+#         group = groups[group_idx]
+#         group_values = w_var[group, output_channel]  # Keep the structure
+
+#         # Exclude zeros by setting them to infinity temporarily for the min operation
+#         non_zero_mask = group_values != 0
+        
+#         if torch.any(non_zero_mask):
+#             non_zero_values = torch.where(non_zero_mask, group_values, torch.tensor(float('inf')).to(group_values.device))
+
+#             if abs_largest:
+#                 # Find the minimum non-zero value and its index within the group
+#                 min_value, min_idx = torch.min(torch.abs(non_zero_values), dim=0)
+#             else:
+#                 min_value, min_idx = torch.min(non_zero_values, dim=0)
+
+#             # Handle the case where group_values might be multidimensional
+#             if group_values.ndim > 1:
+#                 min_idx = min_idx.item()  # Convert tensor index to scalar
+
+#             # Record the minimum non-zero value along with the indices
+#             smallest_elements.append((min_value.item(), group[min_idx], output_channel, group_idx))
+#         else:
+#             # Discard the pair if it doesn't pass the non_zero_mask condition
+#             pairs.discard((output_channel, group_idx))
+
+#     # Sort all collected elements by their magnitude
+#     smallest_elements.sort(key=lambda x: x[0])
+
+#     # Determine the number of (output channel, group_index) pairs to prune, rounding up
+#     num_pairs_to_prune = max(1, math.ceil(total_pairs * elimination_fraction))
+
+#     # Prune the smallest (output channel, group_index) pairs
+#     for _, min_group_idx, output_channel, group_idx in smallest_elements[:num_pairs_to_prune]:
+#         # Zero out the group values in the correct output channel
+#         w_var[min_group_idx, output_channel] = 0
+        
+#         # Update the mask to reflect the pruning
+#         mask[min_group_idx, output_channel] = 0
+        
+#         # Remove the pruned pair from the set of remaining pairs
+#         pairs.discard((output_channel, group_idx))
+
+#     return w_var, pairs, mask
