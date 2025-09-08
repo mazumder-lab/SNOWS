@@ -33,6 +33,10 @@ SNOWS is a one-shot, post-training pruning framework aimed at reducing the cost 
 
 ---
 
+## Download the models
+
+The models are saved at: https://drive.google.com/drive/folders/1LRfbEz5Ui1FBswZa91AXF0VEE-Am_Vgp?usp=sharing
+
 ## Usage
 
 ### Pruning CNNs
