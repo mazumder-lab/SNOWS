@@ -7,7 +7,7 @@ import copy
 import numpy as np
 
 
-from SNOWS import (
+from .SNOWS import (
     get_blocks,
     find_module,
     find_all_module,
@@ -16,8 +16,7 @@ from SNOWS import (
     weight_update_unstr_torch,
     forward_selection,
     solve_for_W_given_Z,
-    MP_unstr,
-    backward_selection_all_unstr
+    MP_unstr
 )
 
 from helpers import extract_conv_layer, get_block_number_for_param
@@ -532,59 +531,40 @@ class LayerPruner:
                 cur_module = prune_list[cur_i]
                 start_data = time.time()
                 prune_flag, prune_module = find_module(block_update, cur_module, name)
+                param_size = self.size_list[i_layer]
+
                 is_depthwise = False
                 if isinstance(prune_module, nn.Conv2d):
                     is_depthwise = prune_module.groups == prune_module.in_channels == prune_module.out_channels
 
-                if i_layer >= len(self.size_list):
-                    raise IndexError(f"i_layer ({i_layer}) is out of bounds for size_list with length {len(self.size_list)}")
-
-                param_size = self.size_list[i_layer]
-                if isinstance(prune_module, nn.Conv2d):
+                if isinstance(prune_module, torch.nn.Conv2d):
                     d_out, d_in, k_h, k_w = param_size
-                elif isinstance(prune_module, nn.Linear):
-                    d_out, d_in = param_size
-                else:
-                    raise NotImplementedError(f"Unsupported module type: {type(prune_module)}")
+                elif isinstance(prune_module, torch.nn.Linear):
+                    d_row, d_col = param_size
 
                 if w_warm or mask_alg != "MP":
                     hook_handle = prune_module.register_forward_hook(self.getinput_hook)
-                    if isinstance(prune_module, nn.Conv2d):
-                        unfold = nn.Unfold(
-                            prune_module.kernel_size,
-                            dilation=prune_module.dilation,
-                            padding=prune_module.padding,
-                            stride=prune_module.stride
-                        )
+                    unfold = nn.Unfold(prune_module.kernel_size, dilation=prune_module.dilation, padding=prune_module.padding, stride=prune_module.stride)
                     self.input_buffer = []
-                    forward_pass_in_batches_no_return(block_update, xdata, batch_size, memory_device)
-                    if isinstance(prune_module, nn.Conv2d):
-                        inp = np.vstack([
-                            unfold(inss).permute([1, 0, 2]).flatten(1).cpu().numpy()
-                            for inss in self.input_buffer
-                        ])
-                    elif isinstance(prune_module, nn.Linear):
-                        inp = np.vstack([inss.permute([1, 0]).to("cpu").numpy() for inss in self.input_buffer])
-                    else:
-                        raise NotImplementedError(f"Unsupported module type: {type(prune_module)}")
-
+                    forward_pass_in_batches_no_return(block_update, xdata, batch_size, device, self.nsamples)
+                    inp = np.vstack([unfold(inss).permute([1, 0, 2]).flatten(1).to("cpu").numpy() for inss in self.input_buffer])
                     hook_handle.remove()
                     prune_flag, prune_module = find_module(block, cur_module, name)
                     hook_handle = prune_module.register_forward_hook(self.getinput_hook)
                     self.input_buffer = []
-                    forward_pass_in_batches_no_return(block, xdata2, batch_size, memory_device)
-                    if isinstance(prune_module, nn.Conv2d):
-                        inp2 = np.vstack([
-                            unfold(inss).permute([1, 0, 2]).flatten(1).cpu().numpy()
-                            for inss in self.input_buffer
-                        ])
-                    elif isinstance(prune_module, nn.Linear):
-                        inp2 = np.vstack([inss.permute([1, 0]).to("cpu").numpy() for inss in self.input_buffer])
-                    else:
-                        raise NotImplementedError(f"Unsupported module type: {type(prune_module)}")
-
+                    forward_pass_in_batches_no_return(block, xdata2, batch_size, device, self.nsamples)
+                    inp2 = np.vstack([unfold(inss).permute([1, 0, 2]).flatten(1).to("cpu").numpy() for inss in self.input_buffer])
                     inss_2 = self.input_buffer[0]
                     hook_handle.remove()
+
+                    count = np.prod(param_size)
+                    w_var = np.copy(w_layer[i_w:i_w + count]).reshape(param_size[0], -1).T
+                    XTX = inp @ inp.T / self.nsamples
+                    XTX += self.lambda_inv * np.eye(XTX.shape[0]) * np.mean(np.diag(XTX))
+                    XTY = (inp @ inp2.T) @ w_var / self.nsamples
+                else:
+                    count = np.prod(param_size)
+                    w_var = np.copy(w_layer[i_w:i_w + count]).reshape(param_size[0], -1).T
 
                 count = np.prod(param_size)
                 w_var = np.copy(w_layer[i_w:i_w + count]).reshape(param_size[0], -1).T
@@ -592,7 +572,7 @@ class LayerPruner:
                 layer_name = f"{name}.{cur_module}" if not cur_module.startswith(name + ".") else cur_module
                 layer_sparsity = per_layer_sparsity.get(layer_name, target_sparsity)
                 print(f"Pruning layer {layer_name} with {layer_sparsity:.2f}% sparsity")
-
+                
                 if self.algo == "MP":
                     w_sol = MP_unstr(w_var, 100.0 - layer_sparsity)
                 elif self.algo == "MP+":
