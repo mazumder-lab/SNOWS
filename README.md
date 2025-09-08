@@ -41,7 +41,7 @@ Inside the **CNN_pruning** folder, you will find various scripts to prune CNNs.
 
 **Example: Unstructured pruning** (e.g., ResNet-20 on CIFAR-10)
 ```
-python unstr.py \
+python prune_unstr.py \
 --arch resnet20_cifar10 \
 --dset cifar10 \
 --batch_size 512 \
