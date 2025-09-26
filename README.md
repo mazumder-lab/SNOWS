@@ -83,7 +83,7 @@ python prune_NM.py \
 --arch vit_b_16 \
 --dset imagenet \
 --test_batch_size 128 \
---ngrads 256 \
+--ngrads 3000 \
 --seed 42 \
 --algo SNOWS \
 --NM_N 2 \
