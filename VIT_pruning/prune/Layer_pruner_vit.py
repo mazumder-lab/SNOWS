@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 import sys
 IHTPATH = './Algs'
 sys.path.append(IHTPATH)
-from group_prunealg_vit import get_blocks, find_module, find_all_module, solve_for_W_given_Z, make_nm_sparse
+from SNOWS import get_blocks, find_module, find_all_module, solve_for_W_given_Z, make_nm_sparse
 from helpers import replace_block_in_vit, zero_grads, get_pvec, compute_metrics
 
 
