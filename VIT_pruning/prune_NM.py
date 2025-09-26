@@ -11,8 +11,8 @@ import torch
 from torch.utils.data import DataLoader
 
 # Adjust these imports if needed
-from pruners.utils import model_factory, set_seed
-from pruners.Layer_pruner_vit import LayerPruner
+from prune.utils import model_factory, set_seed
+from prune.Layer_pruner_vit import LayerPruner
 
 def main():
     parser = argparse.ArgumentParser()
