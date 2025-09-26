@@ -5,9 +5,7 @@ import copy
 import time
 from torch.utils.data import DataLoader
 import sys
-IHTPATH = './Algs'
-sys.path.append(IHTPATH)
-from SNOWS import get_blocks, find_module, find_all_module, solve_for_W_given_Z, make_nm_sparse
+from .SNOWS import get_blocks, find_module, find_all_module, solve_for_W_given_Z, make_nm_sparse
 from helpers import replace_block_in_vit, zero_grads, get_pvec, compute_metrics
 
 
@@ -135,6 +133,9 @@ class LayerPruner:
             for cur_i in range(len(prune_list)):
 
                 cur_module_name = prune_list[cur_i]
+
+                print("Pruning", cur_module_name)
+                
                 prune_flag, prune_module_update = find_module(block_update, cur_module_name, name)
                 prune_flag, prune_module = find_module(block, cur_module_name, name)
 
@@ -257,7 +258,6 @@ class LayerPruner:
                 # Optionally re-load the updated state_dict back into the model (if needed)
                 model_update.load_state_dict(model_state_dict)
 
-    
                 # # Record OOS metrics for each element in prune_list
                 accuracy, loss = compute_metrics(model_update, self.test_dataloader, criterion=nn.CrossEntropyLoss(), device='cuda:0', memory_device = memory_device, verbose=False, n_samples=10000, seed=42)
 
@@ -275,9 +275,6 @@ class LayerPruner:
 
             xdata, xdata2 = forward_pass_in_batches(block_update, block, xdata, xdata2, batch_size, device='cuda')
             block_count += 1
-
-
-            # accuracy, loss = compute_metrics(model_update, self.test_dataloader, criterion=nn.CrossEntropyLoss(), device='cuda:0', memory_device=memory_device, verbose=False, n_samples=10000, seed=42)
 
             if name not in accuracies:
                 accuracies[name] = []
